@@ -18,7 +18,7 @@ This project focuses on addressing a critical challenge for World Plus, a mid-si
 
 This technical report details the application of the CRISP-DM methodology, employing various machine learning algorithms to achieve this objective. The project aims to provide a data-driven solution for World Plus to strategically target customers.
 
-**Note:** Artificial Intelligence (AI) tools were **not** used in any part of this assignment.
+**Note:** Artificial Intelligence (AI) tools were **not** used in any part of this project.
 
 ## Project Objective
 The primary objective of this project was to build a machine learning algorithm that accurately predicts lead conversion for World Plus's new term deposit product, thereby maximizing net profit for the bank.
