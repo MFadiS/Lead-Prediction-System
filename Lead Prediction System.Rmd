@@ -1,0 +1,402 @@
+---
+title: "AIP Group 12"
+output: html_document
+date: "2023-11-23"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(keras)
+library(reticulate)
+# Load caret for data partitioning
+library(caret)
+
+# Load e1071 package for svm
+library("e1071")
+
+
+# Load randomForest package for Random Forest Model
+library(randomForest)
+
+# Load randomForestSRC package for Random Forest Model tuning
+library(randomForestSRC)
+
+# Load the ROCR package for ROC chart
+
+library(pROC)
+library(ROSE)
+library(C50)
+library(neuralnet)
+library(mltools)
+library(data.table)
+library(FSelector)
+
+data <- read.csv("simulated_data.csv", stringsAsFactors = TRUE)
+```
+
+```{r}
+#Data cleaning
+data$ID <- NULL
+data$Target <- as.factor(data$Target)
+newdata <- data %>% filter(Dependent >= 0)
+newdata$Marital_Status <- as.factor(newdata$Marital_Status)
+newdata$Credit_Product <- as.factor(newdata$Credit_Product)
+
+# Replace NA in Credit_Product with mode
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+mode_Credit_Product <- getmode(newdata$Credit_Product)
+newdata$Credit_Product[is.na(newdata$Credit_Product)] <- mode_Credit_Product
+
+
+#Target encoding for Region Code:
+build_target_encoding <- function(data_set, col_to_encode, target_col, verbose = TRUE) {
+  encoding <- data_set %>%
+    group_by(.data[[col_to_encode]]) %>%
+    summarise(posterior_prob = sum(.data[[target_col]] == 1) / n(), .groups = "drop")
+
+  # Merge the encoding back into the original data_set
+  data_set <- left_join(data_set, encoding, by = col_to_encode)
+
+  if (verbose) {
+    cat("Target encoding for", col_to_encode, "completed.\n")
+  }
+
+  return(data_set)
+}
+encoded_data <- build_target_encoding(newdata,"Region_Code", "Target") 
+encoded_data <- encoded_data %>%
+  rename(Region_Code_encoded = posterior_prob)
+encoded_data$Region_Code <-NULL
+
+#Recode binary categorical variable:
+encoded_data$Gender<-ifelse(encoded_data$Gender=="Female",0,1)
+encoded_data$Credit_Product <- ifelse(encoded_data$Credit_Product=="Yes",1,0)
+encoded_data$Active <- ifelse(encoded_data$Active=="Yes",1,0)
+encoded_data$Target <- as.factor(encoded_data$Target)
+
+# Apply one hot encoding
+col_to_encode =c("Marital_Status","Occupation","Channel_Code","Account_Type")
+encoded_data_1 <- one_hot(as.data.table(encoded_data), cols = col_to_encode)
+
+#Convert factor to numeric variable
+
+encoded_data_1[, c("Age", "Dependent", "Marital_Status_0","Marital_Status_1","Marital_Status_2","Years_at_Residence","Occupation_Entrepreneur","Occupation_Other","Occupation_Salaried","Occupation_Self_Employed","Channel_Code_X1","Channel_Code_X2","Channel_Code_X3","Channel_Code_X4","Vintage","Avg_Account_Balance","Account_Type_Gold","Account_Type_Platinum","Account_Type_Silver","Registration")] <- lapply(encoded_data_1[, c("Age", "Dependent", "Marital_Status_0","Marital_Status_1","Marital_Status_2","Years_at_Residence","Occupation_Entrepreneur","Occupation_Other","Occupation_Salaried","Occupation_Self_Employed","Channel_Code_X1","Channel_Code_X2","Channel_Code_X3","Channel_Code_X4","Vintage","Avg_Account_Balance","Account_Type_Gold","Account_Type_Platinum","Account_Type_Silver","Registration")], as.numeric)
+
+summary(encoded_data_1)
+str(encoded_data_1)
+```
+
+```{r}
+#Data Partitioning
+set.seed(123)
+
+index = createDataPartition(encoded_data_1$Target, p = 0.7, list = FALSE)
+
+# Generate training and test data
+training =encoded_data_1[index,]
+test = encoded_data_1[-index,]
+```
+
+```{r}
+#Data balancing
+oversampled <- ovun.sample(Target~., data = training, method = "over", p=0.4, seed=1)$data 
+```
+
+```{r}
+#Information gain
+
+# Use function information.gain to compute information gain values of the attributes
+weights <- information.gain(Target~., oversampled)
+
+# Add row names as a column to keep them during ordering
+weights$attr <- rownames(weights)
+
+# Sort the weights in decreasing order of information gain values.
+weights <- arrange(weights, -attr_importance)
+
+# Plot the weights
+barplot(weights$attr_importance, names = weights$attr, las = 2, ylim = c(0, 0.1))
+```
+
+```{r}
+# Gradient boosting
+library(xgboost)
+library(caTools)
+
+test_X <- subset(test, select = -Target)
+test_y <- test$Target
+dtest <- xgb.DMatrix(data = as.matrix(test_X), label = test_y)
+
+params <- list(
+  booster = "gbtree",
+  eta = 0.01,
+  max_depth = 8,
+  gamma = 4,
+  subsample = 0.75,
+  colsample_bytree = 1,
+  objective = "binary:logistic",
+  eval_metric = "logloss")
+
+# Extract predictors and target variable from the datasets
+train_X <- subset(oversampled, select = -Target)
+train_y <- ifelse(oversampled$Target=="0",0,1)
+
+# Convert data to DMatrix format for xgboost
+dtrain <- xgb.DMatrix(data = as.matrix(train_X), label = train_y)
+
+GB_model <- xgboost(params = params, data = dtrain, nrounds = 100)
+GB_prediction <-predict(GB_model, dtest,reshape=TRUE)
+GB_class <- ifelse(GB_prediction > 0.5, 1, 0)
+GB_class <- as.factor(GB_class)
+GB_conf_matrix <- confusionMatrix(GB_class, as.factor(test$Target), positive = "1", mode = "prec_recall")
+print(GB_conf_matrix)
+```
+
+```{r}
+#Random Forest
+
+set.seed(1)
+
+# Build Random Forest model and assign it to model_RF
+RF_model <- randomForest(Target~., oversampled, ntree = 500, mtry=10, nodesize=1)
+
+RF_pred <- predict(RF_model, test)
+# Assuming you have the predict_proba function available
+RF_prob <- predict(RF_model, test,type="prob")
+RF_conf_matrix <- confusionMatrix(RF_pred, test$Target, positive='1', mode = "prec_recall")
+print(RF_conf_matrix)
+```
+
+```{r}
+#Decision Tree
+
+# Build the decision tree model
+tree_model <- C5.0(Target~., oversampled)
+
+#Confusion matrix
+tree_pred <- predict(tree_model, test)
+tree_prob <- predict(tree_model, test,type="prob")
+tree_conf_matrix <- confusionMatrix(tree_pred, as.factor(test$Target), positive='1', mode = "prec_recall")
+print(tree_conf_matrix)
+```
+
+```{r}
+#Logistic Regression
+LogReg <- glm(Target~. , oversampled, family = "binomial")
+
+LogReg_pred <- predict(LogReg, test, type="response")
+
+LogReg_class <- ifelse(LogReg_pred > 0.5, 1, 0)
+
+#To convert to factor
+
+LogReg_class <- as.factor(LogReg_class)
+
+#Confusion matrix
+Log_conf_matrix <- confusionMatrix(LogReg_class, test$Target, positive = "1", mode = "prec_recall")
+print(Log_conf_matrix)
+```
+
+```{r}
+#Naive Bayes
+
+NB_model <- naiveBayes(Target~ ., data = oversampled)
+
+summary(NB_model)
+
+# Predict the probabilities class of the test data 
+NB_pred <- predict(NB_model, test, type="class")
+NB_prob <-  predict(NB_model, test, type="raw")
+NB_conf_matrix<- confusionMatrix(NB_pred, test$Target, positive = "1",mode = "prec_recall")
+print(NB_conf_matrix)
+```
+
+```{r}
+#SVM
+SVM_model <- svm(Target~., oversampled, kernel= "radial", scale = TRUE, probability = TRUE)
+
+# Predict the class of the test data 
+SVM_pred <- predict(SVM_model, test)
+
+SVM_prob <- attr(predict(SVM_model, test,probability = TRUE), "probabilities")
+
+# Use confusionMatrix to print the performance of SVM model
+SVM_conf_matrix <- confusionMatrix(SVM_pred, test$Target, positive='1', mode = "prec_recall")
+print(SVM_conf_matrix)
+```
+
+```{r}
+#Gain chart
+library(CustomerScoringMetrics)
+
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+
+GainTable_LogReg <- cumGainsTable(LogReg_pred, test$Target, resolution = 1/100)
+
+GainTable_SVM <- cumGainsTable(SVM_prob[,2], test$Target, resolution = 1/100)
+
+GainTable_RF <- cumGainsTable(RF_prob[,2], test$Target, resolution = 1/100)
+
+GainTable_GB <- cumGainsTable(GB_prediction, test$Target, resolution = 1/100)
+
+GainTable_NB <- cumGainsTable(NB_prob[,2], test$Target, resolution = 1/100)
+
+GainTable_DT <- cumGainsTable(tree_prob[,2], test$Target, resolution = 1/100)
+
+#Plot cumulative gain chart
+
+plot.new()  
+ggplot() +
+  geom_line(aes(x = seq_along(GainTable_LogReg[,4]), y = GainTable_LogReg[,4], color = "LogReg")) +
+  geom_line(aes(x = seq_along(GainTable_GB[,4]), y = GainTable_GB[,4], color = "GB")) +
+  geom_line(aes(x = seq_along(GainTable_NB[,4]), y = GainTable_NB[,4], color = "NB")) +
+  geom_line(aes(x = seq_along(GainTable_DT[,4]), y = GainTable_DT[,4], color = "DT")) +
+  geom_line(aes(x = seq_along(GainTable_SVM[,4]), y = GainTable_SVM[,4], color = "SVM")) +
+  geom_line(aes(x = seq_along(GainTable_RF[,4]), y = GainTable_RF[,4], color = "RF")) +
+  geom_abline(intercept = 0, slope = 1, color = "darkgrey") +
+  xlab("Percentage of test instances") +
+  ylab("Percentage of true customers reached") +
+  scale_color_manual(
+    name = "",
+    values = c("LogReg" = "#1f78b4", "GB" = "#33a02c", "NB" = "#e31a1c", "DT" = "#b15928", "SVM" = "#6a3d9a", "RF" = "#a6cee3"),
+    labels = c("Logistric Regression", "Gradient Boosting", "Naive Bayes", "Decision Tree", "SVM", "Random Forest")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.justification = "center"
+  )
+
+ggplot() +
+     geom_line(aes(x = seq_along(GainTable_NB[,4]), y = GainTable_NB[,4], color = "NB")) +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey") +
+     xlab("Percentage of leads reached") +
+     ylab("Percentage of true customers reached") +
+     scale_color_manual(
+         name = "",
+         values = c("NB" = "#9c8055"),
+         labels = c("Naive Bayes")
+     ) +
+     theme(
+         legend.position = "bottom",
+         legend.justification = "center"
+     )
+
+```
+
+
+```{r}
+#Estimated profit and loss
+profit_TP <- mean(test$Avg_Account_Balance)
+loss_FP <- 552
+loss_FN <-mean(test$Avg_Account_Balance)
+ 
+#XGBoosting
+GB_conf_table <- as.table(GB_conf_matrix$table)
+GB_revenue <- GB_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+GB_loss <- (loss_FP*GB_conf_table["1", "0"] + (loss_FN)*GB_conf_table["0", "1"])/length(test$Target)
+GB_profit <- GB_revenue - GB_loss
+
+#LogReg
+Log_conf_table <- as.table(Log_conf_matrix$table)
+Log_revenue <- Log_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+Log_loss <- (loss_FP*Log_conf_table["1", "0"] + (loss_FN)*Log_conf_table["0", "1"])/length(test$Target)
+Log_profit <- Log_revenue - Log_loss
+
+#Decision Tree
+DT_conf_table <- as.table(tree_conf_matrix$table)
+DT_revenue <- DT_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+DT_loss <- (loss_FP*DT_conf_table["1", "0"] + (loss_FN)*DT_conf_table["0", "1"])/length(test$Target)
+DT_profit <- DT_revenue - DT_loss
+
+#Naive Bayes
+NB_conf_table <- as.table(NB_conf_matrix$table)
+NB_revenue <- NB_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+NB_loss <- (loss_FP*NB_conf_table["1", "0"] + (loss_FN)*NB_conf_table["0", "1"])/length(test$Target)
+NB_profit <- NB_revenue - NB_loss
+
+#SVM
+SVM_conf_table <- as.table(SVM_conf_matrix$table)
+SVM_revenue <- SVM_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+SVM_loss <- (loss_FP*SVM_conf_table["1", "0"] + (loss_FN)*SVM_conf_table["0", "1"])/length(test$Target)
+SVM_profit <- SVM_revenue - SVM_loss
+
+#Random Forest
+RF_conf_table <- as.table(RF_conf_matrix$table)
+RF_revenue <- RF_conf_table["1", "1"]*(profit_TP-loss_FP)/length(test$Target)
+RF_loss <- (loss_FP*RF_conf_table["1", "0"] + (loss_FN)*RF_conf_table["0", "1"])/length(test$Target)
+RF_profit <- RF_revenue - RF_loss
+
+# Create a data frame
+profit_table <- data.frame(
+  Model = c("XGBoost", "Logistic Regression", "Decision Tree", "Naive Bayes","SVM","RF"),
+  Profit = c(GB_profit, Log_profit, DT_profit, NB_profit,SVM_profit,RF_profit),
+  Revenue = c(GB_revenue,Log_revenue,DT_revenue,NB_revenue,SVM_revenue,RF_revenue),
+  Cost = c(GB_loss,Log_loss,DT_loss,NB_loss,SVM_loss,RF_loss)
+)
+profit_table <- profit_table %>%
+  arrange(desc(Profit))
+
+# Print the profit table
+print(profit_table)
+```
+
+
+
+```{r}
+#Calculate AUC
+
+## Logistic regression
+ROC_LogReg <- roc(test$Target, LogReg_pred)
+
+## SVM
+ROC_SVM <- roc(test$Target, SVM_prob[,2])
+
+## Random Forest
+ROC_RF <- roc(test$Target, RF_prob[,2])
+
+## GB
+ROC_GB <- roc(test$Target, GB_prediction)
+
+## Decision tree
+ROC_DT <- roc(test$Target, tree_prob[,2])
+
+## Naive Bayes
+ROC_NB <- roc(test$Target, NB_prob[,2])
+
+
+#Calculate the area under the curve (AUC)
+
+auc_table <- data.frame(Model = c("XGBoost", "Logistic Regression", "Decision Tree", "Naive Bayes","SVM","RF"),
+                        AUC = c(auc(ROC_GB),auc(ROC_LogReg),auc(ROC_DT),auc(ROC_NB),auc(ROC_SVM),auc(ROC_RF)))
+auc_table <- auc_table%>% arrange(desc(AUC))
+print(auc_table)
+```
+
+
+
+```{r}
+#ROC chart
+pROC::ggroc(
+  list(LogReg = ROC_LogReg, SVM = ROC_SVM, Random_Forest = ROC_RF, Gradient_Boosting = ROC_GB, Decision_Tree = ROC_DT, Naive_Bayes = ROC_NB),
+  legacy.axes = TRUE
+) +
+xlab("Fasle Positive Rate") +
+ylab("True Positive Rate") +
+geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") +
+scale_linetype_manual(
+  values = c("Logistic Regression", "SVM", "Random Forest", "Gradient Boosting", "Decision Tree", "Naive Bayes")  
+) +theme(legend.position = "bottom")
+```
+
