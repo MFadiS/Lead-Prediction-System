@@ -1,5 +1,5 @@
 ---
-title: "AIP Group 12"
+title: "Predictive Analytics Project"
 output: html_document
 date: "2023-11-23"
 editor_options: 
